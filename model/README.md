@@ -1,19 +1,22 @@
 # model/
 
-Your pricing / first-week trading model is developed here, separately from the data pipeline in `src/ipo_watch`.
+The model is developed here, separately from the data scripts in `scripts/`.
 
-## Interface with the pipeline
+## Input
+`data/small/dataset.csv`, one row per IPO, built by `scripts/s5_build_dataset.py`:
 
-**Input** (produced by `ipo_watch.features`):
-- Table `feature_snapshots(deal_id, as_of, feature_name, value, topic, sources)`. Point-in-time: every value was known at `as_of`.
-- Table `outcomes(deal_id, final_price, open_d1, close_d1..close_d5, volume_d1..d5)`. These are the targets.
-- Or the parquet files exported by `ipo_watch.features.export` into `data/processed/`.
+| column | meaning |
+|---|---|
+| `first_trade_date` | used to split train/test by time (not a feature) |
+| `price_vs_range` | (final price − range midpoint) / midpoint |
+| `range_width` | (high − low) / midpoint |
+| `log_proceeds` | log(final price × shares offered) |
+| `is_nasdaq` | 1 if listed on Nasdaq |
+| `vix` | VIX close on pricing date |
+| `nasdaq_30d` | Nasdaq return over the 30 days before pricing |
+| **`day1_return`** | **target**: day-1 close / final price − 1 |
 
-**Output** (read back by the pipeline / dashboard):
-- Table `predictions(deal_id, as_of, target, p10, p50, p90, model_version, shap)`.
-
-Targets: `T1` final price vs range · `T2` day-1 open pop · `T3` day-1 close · `T4` day-5 close · `T5` week-1 volatility (see `docs/PLAN.txt` §3).
-
-## Layout
-- `src/` holds model code (training, prediction, evaluation).
-- `notebooks/` is for exploration.
+## Plan
+`src/train_small.py`: time split (oldest 75% train / newest 25% test), then compare
+baseline (median) → linear on `price_vs_range` → linear on all → depth-3 tree.
+Metrics: MAE and direction accuracy. See `docs/START_SMALL.txt` step 6.

@@ -1,1 +1,0 @@
-"""Manifold API collector."""

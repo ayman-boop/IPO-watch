@@ -1,1 +1,0 @@
-"""NewsAPI / Finnhub headlines."""

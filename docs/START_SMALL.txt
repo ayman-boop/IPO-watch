@@ -1,0 +1,164 @@
+================================================================================
+              IPO-WATCH — START SMALL: A FIRST END-TO-END PIPELINE
+================================================================================
+
+GOAL
+----
+Build one complete, tiny pipeline from beginning to end before scaling
+anything up:
+
+   ~100 recent IPOs  →  5-8 numbers per IPO  →  one CSV  →  a small model
+   that predicts the DAY-1 RETURN
+
+No database, scheduler, social media, prediction markets or LLMs yet.
+Each step is one script that writes one CSV. Open every CSV and look at
+it before moving on; that's how you learn what the data really looks like.
+
+The full design (docs/ARCHITECTURE.txt) is where this grows later. The last
+section of this file shows how each small step becomes a real module.
+
+
+--------------------------------------------------------------------------------
+KEY IDEAS (read once)
+--------------------------------------------------------------------------------
+TARGET    The number we want to predict. Here:
+            day1_return = (day-1 closing price - IPO price) / IPO price
+FEATURE   Something known BEFORE trading starts that might explain the
+          target: the price range, deal size, VIX...
+ROW       One IPO. COLUMN = one feature or the target.
+LEAKAGE   Using information the model couldn't have had at prediction time
+          (for example the day-2 price). It makes results look far better
+          than they really are. Rule: every feature must be known on
+          pricing night.
+BASELINE  The simplest possible guess: "every IPO returns the average".
+          A model only counts as useful if it beats this.
+TIME SPLIT  Train on older IPOs and test on newer ones, never shuffled
+          randomly. That's how the model will be used in real life.
+OVERFITTING  With about 100 rows, a complex model memorizes noise. Keep
+          features few and models simple.
+
+
+--------------------------------------------------------------------------------
+THE PIPELINE — 6 STEPS
+--------------------------------------------------------------------------------
+
+STEP 1  List the IPOs                       scripts/s1_list_ipos.py
+        → data/small/01_ipos.csv
+  What: find every 424B4 (final prospectus) filed in 2024-2025 using
+        EDGAR's quarterly index files (full-index/YYYY/QTRn/form.idx).
+  Filter out what isn't a traditional IPO:
+        - SPACs (SIC code 6770, or "Acquisition Corp" in the name)
+        - follow-on offerings (the company already filed a 10-K or 10-Q)
+        - companies with no S-1 or F-1 before the 424B4
+  Columns: cik, company, accession_424b4, filed_date
+  Check: compare about 20 rows by hand against a public IPO calendar
+         (Nasdaq or NYSE). Are they real IPOs?
+  You learn: EDGAR indexes, CIKs, form types, and that raw data is
+         messy.
+
+STEP 2  Pull deal terms out of the filings  scripts/s2_extract_terms.py
+        → data/small/02_terms.csv
+  What: for each IPO, download two documents:
+        a) the 424B4  → final_price, shares_offered, ticker, exchange
+        b) the LAST S-1/A (or F-1/A) before it → price_low, price_high
+  Method: regex on the cover page only (the first ~5,000 characters).
+          Leave a field empty (NaN) when the regex finds nothing.
+          Don't guess.
+  Columns: + final_price, price_low, price_high, shares_offered, ticker,
+           exchange
+  Check: print the rows where something is missing and open those
+         filings in a browser. Fix the regex, re-run. Aim for ≥90% of
+         rows complete.
+  You learn: what a prospectus looks like, why parsing is the hard part,
+         and how to check extraction quality.
+
+STEP 3  Get what actually happened          scripts/s3_outcomes.py
+        → data/small/03_outcomes.csv
+  What: use yfinance(ticker) to get the first trading day: open, close,
+        volume. Also day 5 if you want a second target later.
+  Columns: + first_trade_date, open_d1, close_d1, close_d5
+  Check: open_d1 should be near final_price (within about 2x). Big gaps
+         usually mean a wrong ticker or a reverse split.
+  You learn: joining data from two different sources.
+
+STEP 4  Add market context                  scripts/s4_market.py
+        → data/small/04_market.csv
+  What: for each IPO's pricing date (the day before first_trade_date),
+        from yfinance:
+        - vix: VIX closing level that day
+        - nasdaq_30d: Nasdaq Composite return over the previous 30 days
+  Only look at data from on or before the pricing date (leakage rule).
+  You learn: point-in-time features, the simple version of the big
+         plan's "known_at" rule.
+
+STEP 5  Build the training table            scripts/s5_build_dataset.py
+        → data/small/dataset.csv
+  Features (8 or fewer):
+        price_vs_range = (final_price - midpoint) / midpoint
+                         ← usually the single strongest predictor
+        range_width    = (price_high - price_low) / midpoint
+        log_proceeds   = log(final_price × shares_offered)
+        is_nasdaq      = 1 / 0
+        vix
+        nasdaq_30d
+  Target: day1_return = close_d1 / final_price - 1
+  Drop rows that are missing the target. Report how many rows remain.
+  Check: describe() every column; plot a histogram of day1_return; plot
+         price_vs_range against day1_return. You should already see the
+         relationship.
+
+STEP 6  Train and evaluate                  model/src/train_small.py
+        → printed results + model/results_small.txt
+  Split: sort by date; oldest 75% = train, newest 25% = test.
+  Models, in order:
+        a) Baseline: predict the train-set median for everyone
+        b) Linear regression on price_vs_range alone
+        c) Linear regression on all features
+        d) A small decision tree (max_depth=3), or LightGBM with
+           strong limits
+  Metric: MAE (mean absolute error, in return points), and direction
+          accuracy (did it predict the sign of the return correctly?).
+  Write down the results table. Then look at the 10 worst predictions
+          and ask: what did the model not know?
+  You learn: baselines, overfitting, and why a simple model often wins
+          on small data.
+
+
+--------------------------------------------------------------------------------
+WHAT THE FOLDERS LOOK LIKE AFTER THIS
+--------------------------------------------------------------------------------
+scripts/
+  s1_list_ipos.py  s2_extract_terms.py  s3_outcomes.py
+  s4_market.py     s5_build_dataset.py
+  edgar_utils.py   ← small shared helper: get(url) with User-Agent +
+                     rate limit + a local cache, so files aren't
+                     downloaded twice
+data/small/        ← one CSV per step, so every step can be inspected
+                     and re-run on its own
+data/cache/        ← downloaded filings (cached)
+model/src/train_small.py
+model/results_small.txt
+
+Each script reads the previous CSV and writes the next one. If step 2's
+parsing improves, re-run steps 2→6 only.
+
+
+--------------------------------------------------------------------------------
+AFTER IT WORKS — GROWING IT, ONE CHANGE AT A TIME
+--------------------------------------------------------------------------------
+Retrain after each change and keep it only if test MAE improves:
+  1. More data: go back to 2019-2023 (about 500+ IPOs)
+  2. Better parsing: underwriter names, VC-backed flag, profitability
+     (net income > 0)
+  3. A second target: day-5 return
+  4. Better time features: was the price range revised before pricing?
+  5. Then the outside signals: prediction markets, news, social media
+
+How the small steps map to the full design:
+  s1 + edgar_utils  → src/ipo_watch/edgar/client.py, fetch.py
+  s2 regex          → src/ipo_watch/edgar/extractors/offering.py
+  s3, s4            → src/ipo_watch/macro/market_data.py
+  s5                → src/ipo_watch/features/builder.py
+  CSV files         → database tables (db/models)
+  train_small.py    → model/ (yours)
+================================================================================

@@ -1,1 +1,0 @@
-"""GDELT articles and tone."""

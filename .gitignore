@@ -1,25 +1,17 @@
 # Python
 __pycache__/
 *.py[cod]
-*.egg-info/
 .venv/
 .pytest_cache/
-.ruff_cache/
-.coverage
 
 # Secrets / local config
 .env
 .claude/settings.local.json
 
-# Data (raw downloads and generated datasets stay local)
-data/raw/**
-data/processed/**
+# Data: downloaded filings and generated CSVs stay local
+data/cache/**
+data/small/**
 !data/**/.gitkeep
-*.sqlite
-*.db
-
-# Notebooks
-.ipynb_checkpoints/
 
 # OS
 .DS_Store

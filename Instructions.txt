@@ -1,0 +1,311 @@
+================================================================================
+                    STEP 1 — LIST THE IPOs  (instructions)
+================================================================================
+
+Files you will write:   scripts/edgar_utils.py
+                        scripts/s1_list_ipos.py
+                        tests/test_s1.py
+Output:                 data/small/01_ipos.csv
+
+
+################################################################################
+PART A — WHAT THIS STEP IS
+################################################################################
+
+The question: "Which companies actually did a traditional IPO in a given
+period?"
+
+Every later step depends on this list. Step 2 reads these companies'
+filings, step 3 looks up their stock prices, and step 6 trains on them. If
+this list contains things that aren't IPOs, every later step inherits that
+noise.
+
+How we answer it: when a company prices an IPO, it files a FINAL PROSPECTUS
+with the SEC. Its form type is 424B4. So:
+
+  1. Download EDGAR's list of every filing made in one quarter.
+  2. Keep the 424B4 rows.
+  3. Remove the 424B4s that are NOT IPOs. This is the real work, because
+     most of them aren't. In Q1 2024 there were 101 filings of type 424B4,
+     and only a minority were real IPOs. The rest are:
+       - FOLLOW-ON offerings: companies already public selling more shares
+         (example: 60 Degrees Pharmaceuticals listed in 2023 and filed a
+          424B4 in Jan 2024 for a follow-on)
+       - SPACs: shell companies with no business ("XYZ Acquisition Corp")
+       - the same company filing more than one 424B4
+
+Start with ONE quarter (2024 Q1). When it works, change one setting to
+cover all of 2024-2025.
+
+Output columns:
+  cik           SEC's permanent ID number for the company
+  company       company name
+  ipo_424b4_date date the final prospectus was filed (≈ pricing date)
+  accession     the 424B4 filing's ID (step 2 uses it to download it)
+  sic           industry code (useful later as a feature)
+  had_s1_date   date of the company's first S-1/F-1 (proves it registered
+                for an IPO)
+
+
+################################################################################
+PART B — COMPUTER SCIENCE CONCEPTS IN THIS STEP
+################################################################################
+
+1. CLIENT–SERVER & HTTP
+   Your script is a CLIENT; sec.gov is a SERVER. You send an HTTP GET
+   request for a URL; the server sends back a STATUS CODE and a BODY.
+     200 = OK        403 = forbidden (e.g. you forgot the User-Agent)
+     404 = not found 429 = too many requests (you went too fast)
+   HEADERS are extra information attached to a request. The SEC requires
+   a "User-Agent" header that identifies you, or it answers 403.
+   → Appears in: edgar_utils.get()
+
+2. APIs and DATA FORMATS
+   An API is a server endpoint meant for programs, not for people.
+   This step uses two different formats:
+     - form.idx: a FIXED-WIDTH TEXT file. Each column starts at a fixed
+       character position. You can't split on spaces, because company
+       names contain spaces ("60 DEGREES PHARMACEUTICALS, INC.").
+     - submissions JSON (data.sec.gov): JSON = nested dictionaries and
+       lists. Here, PARALLEL ARRAYS: form[i], filingDate[i] and
+       accessionNumber[i] all describe filing number i.
+   → Appears in: parse_form_index(), get_company_history()
+
+3. COMPRESSION
+   form.idx is 56 MB, but form.gz is 5.7 MB: the same data, gzip-
+   compressed, 10x smaller. Download the small one and decompress it in
+   memory (Python: gzip.decompress). Text files compress well because
+   they repeat a lot.
+
+4. RATE LIMITING
+   The SEC allows at most 10 requests per second. Go faster and you get
+   blocked. The simplest rate limiter: remember the time of the last
+   request, and if less than 0.1 s has passed, sleep for the
+   difference. This is a basic example of THROTTLING a shared resource.
+   → Appears in: edgar_utils.get()
+
+5. CACHING (memoization on disk)
+   You will run this script dozens of times while learning. Without a
+   cache you'd download the same files over and over. With one, the
+   first run downloads and later runs read from disk instantly.
+     key   = the URL (turned into a safe filename, e.g. its SHA-256 hash)
+     value = the response body saved in data/cache/
+   The same idea as memoizing a function: same input → stored output.
+   Trade-off: cached data can go STALE. That's fine for historical
+   filings (they never change); live data would need an expiry time.
+
+6. IDEMPOTENCY
+   Running the script twice gives exactly the same CSV. It overwrites the
+   output; it never appends duplicates. This lets you re-run any step
+   safely. The cache helps make it true.
+
+7. IDENTIFIERS / KEYS
+   Company names change and get spelled differently. The CIK never
+   changes, so it's the PRIMARY KEY for a company. The accession number
+   is the primary key for a filing. Every step after this joins on these
+   keys, never on names.
+
+8. FILTERING WITH PREDICATES
+   Each rule ("is not a SPAC", "had an S-1 before", "was not already
+   public") is a function that takes a row and returns True or False.
+   Applying them one at a time and printing how many rows each removes
+   is called a FILTER FUNNEL. It shows exactly where your data goes.
+
+9. DATA STRUCTURES & COMPLEXITY
+   - Dedup with a dict keyed by CIK: one pass, O(n). Comparing every row
+     with every other row would be O(n²).
+   - Each candidate company needs ONE extra request (its filing
+     history). That makes the network the slow part, not the CPU, which
+     is why the cache and rate limiter matter more than clever code.
+
+10. ERROR HANDLING & DEFENSIVE CODE
+   Networks fail. A request can time out or return a 5xx error. Handle it
+   by retrying a few times, waiting longer each time (EXPONENTIAL
+   BACKOFF: 1 s, 2 s, 4 s). Data can also be missing: if a company has no
+   "sic", record it as empty instead of crashing.
+
+11. ETL PIPELINE
+   Extract (download) → Transform (parse, filter) → Load (write CSV).
+   Each step script is one small ETL job, and the CSV between steps is a
+   CHECKPOINT you can inspect.
+
+12. TESTING
+   A unit test checks one function against a known input. Parsing
+   form.idx lines is a good candidate: give it 3 real lines copied from
+   the file, assert the fields come out correctly. The project hook runs
+   the tests after every edit.
+
+
+################################################################################
+PART C — HOW TO DO IT
+################################################################################
+
+Setup (once)
+------------
+  cp .env.example .env         then put your real name + email in it
+  (Read it in Python with os.environ, or load the .env file yourself:
+   read each KEY=VALUE line. That's a good small exercise.)
+
+
+C1. scripts/edgar_utils.py — the shared HTTP helper
+-----------------------------------------------------
+One function used by every later script:
+
+    get(url) -> bytes
+      1. Compute the cache path: data/cache/<sha256(url)>
+      2. If that file exists → return its bytes            (cache HIT)
+      3. Otherwise:                                        (cache MISS)
+           wait until ≥ 0.11 s since the previous request  (rate limit)
+           send GET with header User-Agent = SEC_USER_AGENT
+           if status is 429 or 5xx → sleep 1, 2, 4 s and retry (max 3)
+           if status != 200 → raise an error showing the URL and status
+           save the bytes to the cache path
+           return the bytes
+
+  Also add  get_json(url) = json.loads(get(url)).
+
+  Tools: httpx (or requests), hashlib.sha256, pathlib.Path, time.sleep,
+         time.monotonic
+
+  Try it: call get() twice on the same URL and time both calls. The
+  second should take about 0 ms. That's the cache working.
+
+
+C2. Download and parse the quarterly index
+-------------------------------------------
+  URL:  https://www.sec.gov/Archives/edgar/full-index/2024/QTR1/form.gz
+
+  text = gzip.decompress(get(url)).decode("latin-1")
+
+  The file looks like this (a header, then fixed-width rows):
+
+  Form Type   Company Name                          CIK         Date Filed  File Name
+  ------------------------------------------------------------------------------------
+  424B4       60 DEGREES PHARMACEUTICALS, INC.      1946563     2024-01-31  edgar/data/1946563/0001213900-24-008068.txt
+
+  How to parse:
+    - Find the header line (it starts with "Form Type").
+    - Use the positions where each column title starts in that header
+      line (header.index("Company Name"), header.index("CIK"), ...) to
+      slice every row. Don't hardcode the numbers; read them from the
+      header. Then the code still works if the SEC changes the spacing.
+    - .strip() each slice.
+    - The accession number is the end of "File Name":
+      "0001213900-24-008068"
+
+  Write:  parse_form_index(text) -> list of dicts
+  Then keep the rows where form == "424B4" (exactly, not "424B4/A").
+  Print how many there are. For 2024 Q1 you should see 101.
+
+
+C3. Basic filters (no extra downloads needed)
+---------------------------------------------
+  a) Dedupe: keep only the EARLIEST 424B4 per CIK
+     (a dict keyed by cik; replace the stored row if this date is earlier)
+  b) Drop obvious SPACs by name: contains "ACQUISITION" (or
+     "ACQUISITION CORP"). The SIC code check in C4 catches the rest.
+  Print the count after each filter.
+
+
+C4. Check each company's filing history (one request per company)
+------------------------------------------------------------------
+  URL:  https://data.sec.gov/submissions/CIK##########.json
+        (the CIK padded to 10 digits with leading zeros:
+         f"CIK{int(cik):010d}.json")
+
+  Useful fields:
+    j["sic"]                  industry code, as a string ("2834")
+    j["filings"]["recent"]    parallel arrays: "form", "filingDate",
+                              "accessionNumber", ... (index i = filing i)
+
+  Build a list of (form, date) pairs with zip(), then for each company
+  test, using only filings dated BEFORE its 424B4 date:
+
+    is_spac        = sic == "6770"                 (6770 = blank checks)
+    had_s1         = any form in {"S-1", "F-1"}    (registered for an IPO)
+    already_public = any form in {"10-K", "10-Q", "20-F", "40-F"}
+                     (already filing annual/quarterly reports = already
+                      listed, so this 424B4 is a follow-on)
+
+    KEEP  if  had_s1  and not already_public  and not is_spac
+
+  Note: "recent" holds a company's latest ~1000 filings. That's plenty for
+  IPO-stage companies. You can ignore the "files" key (older history) for
+  now.
+
+  60 Degrees Pharmaceuticals should be REMOVED here because it filed
+  10-Q reports before its Jan 2024 424B4. Check that it is.
+
+
+C5. Write the CSV and check it
+-------------------------------
+  Use pandas: pd.DataFrame(rows).sort_values("ipo_424b4_date")
+              .to_csv("data/small/01_ipos.csv", index=False)
+
+  Print the FILTER FUNNEL, for example:
+      424B4 rows ............ 101
+      after dedupe ..........  ??
+      after name filter .....  ??
+      after history check ...  ??   ← your IPO list
+
+  CHECK BY HAND: open the CSV, pick 10 companies, and look each one up
+  (search "<company> IPO" or on the Nasdaq/NYSE IPO calendar). Are they
+  real IPOs? Did anything obvious get removed? Write down any mistakes
+  you find. Each one is a filter rule to fix.
+
+
+C6. tests/test_s1.py
+---------------------
+  - test_parse_form_index: a short header + 3 real lines (copy them from
+    the file) → assert form, company (with its spaces!), cik, date,
+    accession
+  - test_filters: build a fake history for 3 made-up companies (one real
+    IPO, one follow-on with a 10-Q, one SPAC with sic 6770) → assert only
+    the real IPO is kept.
+  Tests must NOT use the network. Make the filter logic a pure function
+  that takes the parsed JSON as input, so it can be tested with fake
+  data.
+
+
+Suggested structure of s1_list_ipos.py
+---------------------------------------
+    YEAR_QUARTERS = [(2024, 1)]          # later: all quarters 2024-2025
+
+    def parse_form_index(text): ...
+    def dedupe_earliest(rows): ...
+    def classify(company_json, ipo_date): -> dict(is_spac, had_s1,
+                                               already_public, sic, s1_date)
+    def main():
+        load index(es) → 424B4 rows → dedupe → name filter
+        → for each: classify(get_json(...)) → keep → write CSV
+        → print funnel
+    if __name__ == "__main__":
+        main()
+
+  Run with:  .venv/bin/python scripts/s1_list_ipos.py
+
+
+################################################################################
+PART D — DONE WHEN
+################################################################################
+  [ ] edgar_utils.get() caches (the second call is instant) and sends
+      the User-Agent
+  [ ] parse_form_index finds 101 424B4 rows for 2024 Q1
+  [ ] The funnel prints, and you can explain why each filter removed
+      what it did
+  [ ] 60 Degrees Pharmaceuticals is removed as a follow-on
+  [ ] 10 spot-checked rows are real IPOs
+  [ ] tests/test_s1.py passes without the network
+  [ ] Re-running the script gives the identical CSV (idempotent)
+  Then: expand YEAR_QUARTERS to 2024-2025 and re-run. This is the only
+  change needed, and the cache makes Q1 free.
+
+Common mistakes
+  - Splitting index lines on whitespace (breaks on company names)
+  - Comparing dates as text in mixed formats. "2024-01-31" strings in
+    ISO format compare correctly as text, but other formats don't.
+  - Forgetting the User-Agent → 403
+  - Using filings from AFTER the 424B4 date in the filters. Every
+    company files 10-Qs after its IPO, so the rule must only look at
+    filings BEFORE it.
+================================================================================

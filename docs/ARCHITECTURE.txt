@@ -21,8 +21,13 @@ the same two keys:
 Matching then becomes a database join instead of guesswork.
 
 Note on format: EDGAR filings are almost always HTML or text, not PDF.
-Some include inline XBRL (machine-readable financial data). PDFs show up
-mostly as attachments. The parser handles HTML first and PDF as a fallback.
+PDFs show up mostly as attachments. The parser handles HTML first and PDF as
+a fallback.
+IPO filings usually do NOT include XBRL financial statements (first-time
+filers only start XBRL with their first 10-Q). The only XBRL in an S-1 is
+usually the filing-fee exhibit (exfilingfees_htm.xml). So S-1 financials
+are parsed from the HTML tables. XBRL (companyfacts API) becomes available
+only after listing.
 
 
 --------------------------------------------------------------------------------
@@ -41,7 +46,7 @@ mostly as attachments. The parser handles HTML first and PDF as a fallback.
        ▼
   [3] EXTRACT (one extractor per section)
        │    tables → pandas/lxml      prose → LLM with a fixed output format
-       │    financials → XBRL first, then the tables
+       │    financials → HTML tables (XBRL only after listing)
        ▼
   [4] CHECK (validation rules, §3) ──► failures go to review_queue
        │
@@ -87,7 +92,7 @@ section has its own extractor, method and output table.
   Dividend Policy                        dividend    regex/LLM     offering_terms
   Capitalization                         cap         table         capitalization
   Dilution                               dilution    table         offering_terms
-  Selected/Summary Financial Data        fin         XBRL/table    financial_facts
+  Selected/Summary Financial Data        fin         table         financial_facts
   MD&A                                   mdna        LLM           kpis, segments,
                                                                    customer_concentration
   Business                               business    LLM           company_profile,
@@ -102,7 +107,7 @@ section has its own extractor, method and output table.
   Shares Eligible for Future Sale        lockup      LLM           lockups
   Underwriting                           uw          table+LLM     underwriters
   Legal Proceedings                      legal       LLM           legal_proceedings
-  Financial Statements (F-pages)         fin         XBRL/table    financial_facts
+  Financial Statements (F-pages)         fin         table         financial_facts
 
 A 424B4 (final prospectus) has the same layout plus the final price.
 That gives offering_terms.final_price and the final share counts.

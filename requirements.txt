@@ -1,0 +1,15 @@
+# Fetching and parsing EDGAR filings
+httpx
+beautifulsoup4
+lxml
+
+# Data
+pandas
+yfinance
+
+# Model + plots
+scikit-learn
+matplotlib
+
+# Tests
+pytest

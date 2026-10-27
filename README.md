@@ -1,60 +1,36 @@
 # IPO-watch
 
-Monitors SEC EDGAR IPO filings, prediction markets, news and social media, and turns them into
-structured, point-in-time data for forecasting IPO pricing and first-week trading.
-
-Design docs: [`docs/PLAN.txt`](docs/PLAN.txt) · [`docs/ARCHITECTURE.txt`](docs/ARCHITECTURE.txt)
+Predict an IPO's day-1 return from SEC filings and market context, starting with a small,
+end-to-end pipeline. Step-by-step plan: [`docs/START_SMALL.txt`](docs/START_SMALL.txt).
 
 ## Setup
 
 ```bash
 python3.12 -m venv .venv
-.venv/bin/pip install -e ".[dev]"
-cp .env.example .env        # set SEC_USER_AGENT at minimum
-.venv/bin/pytest
+.venv/bin/pip install -r requirements.txt
+cp .env.example .env        # put your name + email in SEC_USER_AGENT
 ```
 
 ## Layout
 
 ```
 IPO-watch/
-├── config/                  # editable data, not code
-│   ├── schedule.yaml        #   polling intervals per source
-│   ├── sections.yaml        #   S-1 section headings → extractor
-│   └── topics.yaml          #   shared topic taxonomy (entity × topic matching)
-├── docs/                    # PLAN.txt, ARCHITECTURE.txt
-├── src/ipo_watch/           # data pipeline (installable package)
-│   ├── config.py            #   settings from .env + yaml loader
-│   ├── cli.py               #   `ipo-watch poll-edgar | collect-signals | build-features | run`
-│   ├── db/                  #   SQLAlchemy models (entities, filings, category, signals, features)
-│   ├── edgar/               #   client → fetch → sectionizer → extractors/ → validate → diff
-│   │   └── extractors/      #   one module per S-1 section
-│   ├── entities/            #   entity registry, resolver, watchlist
-│   ├── taxonomy/            #   topic loading + classifier
-│   ├── signals/             #   external collectors + linker
-│   │   ├── prediction_markets/  kalshi, polymarket, manifold, market_parser
-│   │   ├── news/                gdelt, newsapi
-│   │   └── social/              reddit, stocktwits, hackernews, google_trends
-│   ├── macro/               #   FRED, market data, EPU/GPR indices
-│   ├── features/            #   exposure × signal → feature_snapshots (+ export)
-│   ├── scheduler/           #   APScheduler jobs
-│   ├── alerts/              #   email / Discord / Telegram
-│   ├── api/                 #   FastAPI dashboard (later)
-│   └── utils/
-├── model/                   # ← pricing model, developed separately (see model/README.md)
-│   ├── src/
-│   └── notebooks/
-├── data/                    # git-ignored
-│   ├── raw/edgar/           #   original filing documents
-│   ├── raw/signals/         #   raw API payloads
-│   └── processed/           #   exports for model/
-├── notebooks/               # pipeline exploration
-├── scripts/                 # one-off utilities (backfills, fixture downloads)
-└── tests/
-    ├── unit/{edgar,entities,signals,features}/
-    ├── integration/         # live API tests (marked `integration`)
-    └── fixtures/{edgar,signals}/   # saved real filings / API responses
+├── scripts/            # pipeline steps, run in order; each reads the previous CSV
+│   ├── edgar_utils.py  #   shared: EDGAR GET with User-Agent, rate limit, local cache
+│   ├── s1_list_ipos.py     → data/small/01_ipos.csv
+│   ├── s2_extract_terms.py → data/small/02_terms.csv
+│   ├── s3_outcomes.py      → data/small/03_outcomes.csv
+│   ├── s4_market.py        → data/small/04_market.csv
+│   └── s5_build_dataset.py → data/small/dataset.csv
+├── model/src/          # train_small.py: baseline vs linear vs small tree
+├── data/
+│   ├── small/          # the step CSVs (git-ignored)
+│   └── cache/          # downloaded filings (git-ignored)
+├── tests/              # created with the first script
+└── docs/               # START_SMALL.txt (current), PLAN.txt + ARCHITECTURE.txt (long-term)
 ```
 
-**Boundary between pipeline and model:** the pipeline writes `feature_snapshots` and `outcomes`;
-the model reads them and writes `predictions`. Nothing in `src/ipo_watch` imports from `model/`.
+Run a step: `.venv/bin/python scripts/s1_list_ipos.py`
+
+The full-scale layout (database, collectors, signals) is in commit `53e802a` and
+`docs/ARCHITECTURE.txt`, for when the small version works.
