@@ -1,0 +1,283 @@
+================================================================================
+                              IPO-WATCH — PROJECT PLAN
+================================================================================
+
+GOAL
+----
+1. Watch SEC EDGAR for new and updated IPO filings.
+2. Watch prediction markets, news and social media for signs of upcoming IPOs.
+3. Predict, and keep updating as new information arrives:
+     a) the final offer price, compared with the filed price range
+     b) how the stock trades in its first week (day 1 "pop", then days 2-5)
+   using deal, market, economic, political, geopolitical and social factors.
+
+This is a research and analysis tool, not financial advice.
+
+
+--------------------------------------------------------------------------------
+1. HOW OFTEN TO CHECK FOR UPDATES
+--------------------------------------------------------------------------------
+Checking every 4 hours is too slow around pricing day. The key filings (price
+range set, price range changed, final prospectus) can come in hours apart, and
+the market reacts the same day. Checking EDGAR's RSS feed is cheap (one small
+request), so the schedule can be tiered:
+
+  Source                        Market hours (ET)   Off-hours / weekends
+  ----------------------------  ------------------  --------------------
+  EDGAR RSS (new filings)       every 10 min        every 1 hour
+  EDGAR full-text search        every 1 hour        every 4 hours
+  Prediction markets            every 30 min        every 2 hours
+  News / social                 every 30 min        every 2 hours
+  Macro / market data           once daily + live*  once daily
+  Deals in their pricing week   every 5-10 min      -
+
+  * Live market data (VIX, Nasdaq, IPO ETF) only for deals pricing that day.
+
+SEC rules: at most 10 requests/second, and every request must send a
+User-Agent header containing a name and email.
+
+
+--------------------------------------------------------------------------------
+2. DATA SOURCES
+--------------------------------------------------------------------------------
+A. SEC EDGAR (main source, free)
+   Filing forms that matter:
+     S-1 / F-1         first IPO registration (F-1 = foreign company)
+     S-1/A / F-1/A     amendments; the one that first shows a price range is
+                       the key moment
+     DRS               confidential draft (shows up only once made public)
+     424B4             final prospectus with the final price; the deal has
+                       priced
+     RW                registration withdrawn; IPO cancelled or postponed
+     EFFECT            SEC declared the registration effective
+     8-A12B            listing on an exchange; trading is close
+   Access:
+     - RSS feed of the latest filings (browse-edgar?action=getcurrent)
+     - data.sec.gov submissions JSON for each company (CIK)
+     - EDGAR full-text search (efts.sec.gov) for things like "initial public
+       offering"
+   What to pull out of each filing: price range, number of shares, primary vs
+   secondary shares, underwriters, exchange and ticker, lock-up terms,
+   revenue, net income and growth, use of proceeds, sector (SIC code), VC/PE
+   backing, dual-class shares.
+
+B. Prediction markets
+   - Kalshi (public API): markets on IPO timing and on market cap / valuation
+   - Polymarket (Gamma API): "Will X IPO by <date>?" style markets
+   - Manifold (open API): broader coverage but thinner trading
+   How they're used: market probabilities are both an early warning and an
+   input to the model. The model also tracks how fast the odds change.
+
+C. News and social media
+   - News: GDELT (free, global, includes event tone), NewsAPI or Finnhub news,
+     Reuters/Bloomberg headlines through RSS where allowed
+   - Reddit API: r/stocks, r/wallstreetbets, r/IPO, r/investing
+   - StockTwits (by ticker once the ticker is known)
+   - Hacker News (Algolia API): useful for tech IPOs
+   - X/Twitter: optional because the API is expensive; add later if worth it
+   - Google Trends (pytrends): how much retail attention the company gets
+   Processing:
+     - match each mention to a company or deal (name, ticker, aliases)
+     - score sentiment with FinBERT or an LLM classifier
+     - measure volume and how fast it's growing
+
+D. Market, economic, political and geopolitical data
+   - Market: VIX, S&P 500 / Nasdaq returns over 5/30 days, Renaissance IPO
+     ETF (IPO), sector ETFs, recent IPO returns (the "IPO window"), how many
+     IPOs are pricing that week
+   - Economy (FRED API): Fed funds rate, 10-year yield, yield curve, credit
+     spreads, CPI surprise, unemployment, days until the next FOMC meeting
+   - Policy and politics: Economic Policy Uncertainty index, government
+     shutdown flag (the SEC stops reviewing filings during a shutdown), sector
+     regulation news (antitrust, crypto, AI, China ADR rules)
+   - Geopolitics: GDELT conflict and tension indices, Geopolitical Risk index
+     (Caldara-Iacoviello), tariff and sanctions news, extra flag for
+     China-linked issuers
+   - Comparable companies: valuations (EV/Revenue) and recent returns of
+     listed peers, via yfinance or Financial Modeling Prep
+
+E. Historical training data
+   - Jay Ritter's IPO dataset (Univ. of Florida): first-day returns,
+     underwriter rankings, VC backing; 1980 to present
+   - EDGAR 424B4 + S-1/A history: filed price ranges vs final prices
+   - Price history (yfinance / Polygon / Alpaca): opening price, close and
+     volume for days 1-5 after the IPO
+   Goal: about 10-15 years of US IPOs (around 2,000+ deals). Leave out SPACs
+   and direct listings, or label them separately.
+
+
+--------------------------------------------------------------------------------
+3. WHAT THE MODEL PREDICTS
+--------------------------------------------------------------------------------
+For each IPO the model outputs ranges with probabilities, not single numbers:
+
+  T1  where the final price lands vs the range: below / within / above, and
+      the expected price as a % of the range midpoint
+  T2  day 1 opening "pop" = (first trade price - offer price) / offer price
+  T3  day 1 close return vs offer price
+  T4  day 5 close return vs offer price, and vs day 1 close
+  T5  how volatile it will be in week 1 (the daily trading range)
+
+Each prediction gives a median plus a 10%-90% range, for example:
+"Day 1 close: +18% (likely between -5% and +55%)".
+
+
+--------------------------------------------------------------------------------
+4. FEATURES (MODEL INPUTS)
+--------------------------------------------------------------------------------
+Deal         amount raised, % of shares floated, width of the price range,
+             any range revision and its direction (a strong signal),
+             underwriter rank, number of bookrunners, VC/PE backed, primary
+             vs secondary shares, dual-class, lock-up length, exchange
+Company      sector, age, revenue growth, profitable or not, gross margin,
+             valuation vs peers at the range midpoint
+Market       VIX level and change, Nasdaq 30-day return, sector ETF momentum,
+             average return of the last 10 IPOs, IPO count that week
+Economy      rate level and trend, yield curve, credit spreads, days to FOMC
+Political    policy uncertainty index, shutdown flag, sector regulation
+             sentiment score, election-period flag
+Geopolitical geopolitical risk index, conflict tone, tariff and sanctions
+             news for the sector or issuer's country, China/foreign issuer
+             flag
+Social       mention volume and its growth, sentiment average and spread,
+             Google Trends, Reddit/StockTwits activity, brand recognition
+             (consumer vs B2B)
+Prediction   probability that the IPO happens and how fast it's changing,
+markets      implied valuation if one exists
+
+Leakage rule: every feature must be stored with the time it became known.
+Training only uses what was known at the moment the prediction would have
+been made: when the range was set, on pricing night, and at the open on
+day 1.
+
+
+--------------------------------------------------------------------------------
+5. MODELING APPROACH
+--------------------------------------------------------------------------------
+Step 1  Baselines: the historical average pop by sector and market
+        conditions, plus a simple rule: "priced above range -> big pop".
+Step 2  Main model: gradient-boosted trees (LightGBM/XGBoost) trained for
+        several percentiles at once, giving the 10/50/90% range. They work
+        well on mixed tabular data with a few thousand rows.
+Step 3  Explainability: SHAP values per prediction, so each forecast says
+        why (for example "range raised +15%, hot sector, low VIX").
+Step 4  Updating as news arrives: re-score the deal at every event (new
+        filing, range revision, sentiment spike, market move). Show how the
+        forecast changed over time on a timeline. Optionally, blend in a
+        simple Bayesian adjustment that weights recent news.
+Step 5  Week-1 path: day 5 is predicted given the day 1 result. Once day 1
+        actually trades, plug in the real numbers and re-forecast days 2-5.
+
+Evaluation:
+  - Train on the past, test on later years (no random shuffling). For
+    example: train 2012-2020, validate 2021-2022, test 2023-present.
+  - Metrics: average error on returns, accuracy of the below/within/above
+    prediction, whether 80% of outcomes really fall in the 10-90% ranges,
+    and the profit/loss of a simple strategy as a sanity check.
+  - Check the model across market regimes (2021 boom vs 2022 freeze).
+
+
+--------------------------------------------------------------------------------
+6. ARCHITECTURE
+--------------------------------------------------------------------------------
+Language: Python 3.12
+
+ipo_watch/
+  config.py            settings, API keys (.env), polling schedule
+  db/                  SQLAlchemy models + migrations (SQLite to start,
+                       Postgres later)
+  collectors/
+    edgar.py           RSS + submissions + full-text search, rate-limited
+    edgar_parser.py    pull price range, shares, underwriters, financials
+                       out of S-1/424B4 documents
+    prediction_mkts.py Kalshi, Polymarket, Manifold
+    news.py            GDELT, NewsAPI/Finnhub
+    social.py          Reddit, StockTwits, HN, Google Trends
+    macro.py           FRED, VIX, indices, EPU, GPR
+    market_prices.py   peer valuations, IPO price history after listing
+  entity/              match mentions and filings to a single "Deal" record
+  features/            build features with timestamps (prevents leakage)
+  models/
+    train.py, predict.py, evaluate.py, explain.py
+  scheduler.py         APScheduler jobs on the schedule in section 1
+  alerts.py            notify on new S-1, range revision, pricing, big
+                       forecast change (email / Discord / Telegram)
+  api/ + dashboard     FastAPI + simple web UI: deal list, forecasts,
+                       forecast timeline, SHAP explanations
+tests/                 pytest; runs automatically after every edit
+
+Main database tables:
+  companies, deals, filings, filing_extracts, mentions, sentiment_scores,
+  prediction_markets, macro_series, feature_snapshots, predictions,
+  outcomes
+
+Deployment: start on a laptop (cron/APScheduler). Later move to a small
+cloud VM or a container on a schedule.
+
+
+--------------------------------------------------------------------------------
+7. BUILD PHASES
+--------------------------------------------------------------------------------
+Phase 1  Foundation (week 1)
+  - Project setup, config, database schema, test setup
+  - EDGAR collector: RSS polling + IPO form filter + store filings
+  - Alert when a new S-1/F-1/424B4/RW appears
+  Done when: running it lists today's real IPO filings and alerts on new ones
+
+Phase 2  Filing parsing (weeks 2-3)
+  - Pull price range, shares, underwriters and financials from S-1/A and
+    424B4
+  - Deal timeline: filed -> range set -> revised -> priced -> trading
+  Done when: correct fields for 20 recent IPOs, checked by hand
+
+Phase 3  Historical dataset (weeks 3-4)
+  - Load Ritter data + EDGAR history + day 1-5 prices
+  - Rebuild the feature snapshots that existed at each point in time
+  Done when: a clean training table with roughly 2,000 deals
+
+Phase 4  First model (weeks 5-6)
+  - Baselines -> LightGBM percentile models for T1-T4
+  - Train-on-past/test-on-future evaluation + SHAP
+  Done when: beats the baseline on the test years with ranges that hold up
+
+Phase 5  Outside signals (weeks 6-8)
+  - Prediction markets, news, social, macro/political/geopolitical data
+  - Sentiment scoring + matching mentions to deals
+  - Retrain; keep only the features that clearly help
+  Done when: each signal family shows a measured improvement, or is dropped
+
+Phase 6  Live forecasting (weeks 8-9)
+  - Scheduler on the tiered schedule, re-score on events, forecast history
+  - Dashboard + alerts
+  Done when: the system tracks and forecasts live IPOs on its own
+
+Phase 7  Ongoing
+  - After each IPO's first week, log what actually happened and compare to
+    the forecast
+  - Retrain monthly, watch for the model drifting, add new data sources
+
+
+--------------------------------------------------------------------------------
+8. RISKS & NOTES
+--------------------------------------------------------------------------------
+- Small dataset: only a few hundred IPOs a year, and the market changes a
+  lot between years. Use few features, regularize, and keep the ranges
+  honest.
+- Survivorship bias: keep withdrawn and postponed deals in the dataset.
+- Social and prediction market data only goes back a few years, so the
+  model must work when those values are missing.
+- API costs and terms: X/Twitter, Bloomberg and some news APIs are paid or
+  restricted. Start with free sources. Follow SEC fair-access rules.
+- Day 1 depends heavily on order-book demand, which isn't public. The range
+  revision and the final price relative to the range are the best stand-ins.
+- Not investment advice. Treat the output as estimates with uncertainty.
+
+
+--------------------------------------------------------------------------------
+9. DECISIONS NEEDED FROM YOU
+--------------------------------------------------------------------------------
+- Budget for paid APIs (X/Twitter, Polygon, NewsAPI), or free sources only?
+- Alert channel: email, Discord, Telegram, or SMS?
+- Run locally on your laptop or on an always-on server?
+- US exchanges only (NYSE/Nasdaq), or international IPOs too?
+================================================================================

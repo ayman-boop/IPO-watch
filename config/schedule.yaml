@@ -1,0 +1,7 @@
+# Polling intervals in minutes (see docs/PLAN.txt §1). Market hours = 09:30-16:00 America/New_York.
+edgar_rss:            {market_hours: 10, off_hours: 60}
+edgar_full_text:      {market_hours: 60, off_hours: 240}
+prediction_markets:   {market_hours: 30, off_hours: 120}
+news_social:          {market_hours: 30, off_hours: 120}
+macro:                {daily_at: "17:30"}
+pricing_week_deals:   {market_hours: 5,  off_hours: 60}

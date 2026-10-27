@@ -1,0 +1,21 @@
+# S-1 / F-1 / 424B4 section map (docs/ARCHITECTURE.txt §2).
+# key: {headings: [regex patterns, case-insensitive], extractor: module in edgar/extractors}
+cover:            {headings: ["^prospectus$", "^the offering$"],                         extractor: offering}
+summary:          {headings: ["^prospectus summary$"],                                   extractor: business}
+risk_factors:     {headings: ["^risk factors$"],                                         extractor: risks}
+use_of_proceeds:  {headings: ["^use of proceeds$"],                                      extractor: proceeds}
+dividend_policy:  {headings: ["^dividend policy$"],                                      extractor: offering}
+capitalization:   {headings: ["^capitalization$"],                                       extractor: financials}
+dilution:         {headings: ["^dilution$"],                                             extractor: offering}
+selected_fin:     {headings: ["^(selected|summary) (consolidated )?financial"],           extractor: financials}
+mdna:             {headings: ["^management.s discussion and analysis"],                  extractor: mdna}
+business:         {headings: ["^business$"],                                             extractor: business}
+management:       {headings: ["^management$", "^directors and executive officers"],      extractor: management}
+exec_comp:        {headings: ["^executive compensation$"],                               extractor: compensation}
+related_party:    {headings: ["^certain relationships and related (party|person) transactions"], extractor: related_party}
+principal_holders: {headings: ["^principal (and selling )?(stock|share)holders$"],      extractor: ownership}
+capital_stock:    {headings: ["^description of (capital stock|share capital)"],          extractor: capital_stock}
+future_sale:      {headings: ["^shares eligible for future sale$"],                      extractor: lockups}
+underwriting:     {headings: ["^underwriting"],                                          extractor: underwriting}
+legal:            {headings: ["^legal proceedings$"],                                    extractor: legal}
+financial_stmts:  {headings: ["^index to (consolidated )?financial statements"],         extractor: financials}

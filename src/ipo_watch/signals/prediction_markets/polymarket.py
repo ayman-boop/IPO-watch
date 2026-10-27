@@ -1,0 +1,1 @@
+"""Polymarket Gamma API collector."""

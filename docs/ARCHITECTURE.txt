@@ -1,0 +1,415 @@
+================================================================================
+              IPO-WATCH — DATA ARCHITECTURE: SEC FILINGS → TABLES → SIGNALS
+================================================================================
+
+CORE IDEA
+---------
+EDGAR tells us WHAT EXISTS and HOW MUCH IT MATTERS (exposure).
+Markets, news and social media tell us WHAT MIGHT CHANGE (probability, sentiment).
+
+Example: the S-1 says Jane Doe is CEO and controls 45% of the votes. That is
+the exposure. Kalshi has a market "Will Jane Doe remain CEO through 2027?"
+at 70%, and news says she may step down. Those are the signals.
+Both are tied to the same person and the same topic: LEADERSHIP.CEO_TENURE.
+Joining on (person, topic) produces the feature
+"key-person risk = 45% of votes × 30% chance she leaves × negative news".
+
+So every fact pulled from EDGAR, and every external signal, is labeled with
+the same two keys:
+      (1) ENTITY  — which company, person, organization, product or country
+      (2) TOPIC   — which category from one fixed list (section 4)
+Matching then becomes a database join instead of guesswork.
+
+Note on format: EDGAR filings are almost always HTML or text, not PDF.
+Some include inline XBRL (machine-readable financial data). PDFs show up
+mostly as attachments. The parser handles HTML first and PDF as a fallback.
+
+
+--------------------------------------------------------------------------------
+1. PIPELINE OVERVIEW
+--------------------------------------------------------------------------------
+
+  EDGAR RSS / API
+       │  new filing found (accession number)
+       ▼
+  [1] FETCH ─────► raw_documents   (store the original HTML/PDF unchanged,
+       │                            plus its hash; parsing can be re-run
+       │                            any time)
+       ▼
+  [2] SPLIT INTO SECTIONS ──► filing_sections  (standard S-1 headings, §2)
+       │
+       ▼
+  [3] EXTRACT (one extractor per section)
+       │    tables → pandas/lxml      prose → LLM with a fixed output format
+       │    financials → XBRL first, then the tables
+       ▼
+  [4] CHECK (validation rules, §3) ──► failures go to review_queue
+       │
+       ▼
+  [5] RESOLVE ENTITIES ──► entities + entity_aliases  (people, orgs,
+       │                    products, countries are created or matched)
+       ▼
+  [6] STORE CATEGORY TABLES (§5), each fact with a TOPIC and its source
+       │
+       ▼
+  [7] COMPARE WITH PREVIOUS AMENDMENT ──► filing_events
+       │     (range raised, new CEO, new risk factor, more shares...)
+       ▼
+  [8] UPDATE WATCHLIST ──► watch_terms (names, tickers, aliases,
+                            products, linked to entity and topic) used by
+                            the external collectors
+
+  External collectors (Kalshi, Polymarket, news, Reddit...)
+       │  raw item
+       ▼
+  [9] MATCH TO ENTITIES (using watch_terms) ──► which entity is it about
+  [10] CLASSIFY TOPIC (same topic list) ──► which topic it is about
+  [11] STORE ──► external_signals + signal_links(entity, topic, confidence)
+       ▼
+  [12] FEATURE BUILDER: for each deal and topic, exposure (EDGAR) ×
+       signal (external), computed as of a given time ──► feature_snapshots
+       ▼
+  [13] MODEL
+
+
+--------------------------------------------------------------------------------
+2. SECTION MAP — S-1 / F-1 FOLLOW THE SAME LAYOUT (Regulation S-K)
+--------------------------------------------------------------------------------
+Sections are found using the table of contents and heading text. Each
+section has its own extractor, method and output table.
+
+  Section heading                        Extractor   Method        → Table(s)
+  -------------------------------------  ----------  ------------  -----------------------
+  Cover page / The Offering              offering    regex+LLM     offering_terms
+  Prospectus Summary                     summary     LLM           company_profile
+  Risk Factors                           risks       LLM classify  risk_factors
+  Use of Proceeds                        proceeds    LLM           use_of_proceeds
+  Dividend Policy                        dividend    regex/LLM     offering_terms
+  Capitalization                         cap         table         capitalization
+  Dilution                               dilution    table         offering_terms
+  Selected/Summary Financial Data        fin         XBRL/table    financial_facts
+  MD&A                                   mdna        LLM           kpis, segments,
+                                                                   customer_concentration
+  Business                               business    LLM           company_profile,
+                                                                   products, competitors,
+                                                                   geographic_exposure,
+                                                                   regulatory_exposure
+  Management                             mgmt        table+LLM     people, positions
+  Executive Compensation                 comp        table         compensation
+  Related Party Transactions             related     LLM           related_party_txns
+  Principal (and Selling) Stockholders   owners      table         ownership
+  Description of Capital Stock           capstock    LLM           share_classes
+  Shares Eligible for Future Sale        lockup      LLM           lockups
+  Underwriting                           uw          table+LLM     underwriters
+  Legal Proceedings                      legal       LLM           legal_proceedings
+  Financial Statements (F-pages)         fin         XBRL/table    financial_facts
+
+A 424B4 (final prospectus) has the same layout plus the final price.
+That gives offering_terms.final_price and the final share counts.
+
+LLM extraction: each extractor sends ONE section, not the whole filing,
+together with a strict JSON format (Pydantic model) that the answer must
+follow. Each extracted value also returns a quote from the source text,
+so it can be checked and traced back.
+
+
+--------------------------------------------------------------------------------
+3. VALIDATION (catches parsing errors before they reach the model)
+--------------------------------------------------------------------------------
+  - Ownership: percentages per class ≤ 100%; individual share counts add up
+    to the totals within ±1%
+  - Offering: price_low ≤ price_high; range width usually ≤ 20%;
+    gross proceeds ≈ shares × midpoint
+  - Financials: revenue - costs ≈ reported operating income; periods are
+    in order
+  - People: each officer has at least one role; exactly one CEO; the CEO
+    name matches the signature page
+  - Every fact must carry its source quote, or it is not saved
+  Failures → review_queue (deal, section, rule, values) for manual review
+
+
+--------------------------------------------------------------------------------
+4. TOPIC LIST (shared by EDGAR facts AND external signals)
+--------------------------------------------------------------------------------
+Topic names use the form CATEGORY.SUBCATEGORY. The list grows over time;
+each topic belongs to one category.
+
+LEADERSHIP      CEO_TENURE, FOUNDER_CONTROL, EXEC_DEPARTURE, BOARD_CHANGE,
+                KEY_PERSON_SCANDAL, SUCCESSION
+OWNERSHIP       INSIDER_SELLING, VC_PE_EXIT, DUAL_CLASS_CONTROL,
+                LOCKUP_EXPIRY, ANCHOR_INVESTOR
+OFFERING        TIMING, PRICE_RANGE, SIZE, VALUATION, EXCHANGE, POSTPONE,
+                WITHDRAW, UNDERWRITER
+FINANCIAL       REVENUE_GROWTH, PROFITABILITY, CASH_BURN, DEBT,
+                GUIDANCE, ACCOUNTING_ISSUE
+CUSTOMER        CONCENTRATION, MAJOR_CONTRACT, CHURN
+PRODUCT         LAUNCH, RECALL, OUTAGE, COMPETITION
+REGULATORY      ANTITRUST, PRIVACY, SECTOR_RULE (crypto/AI/health/fintech),
+                SEC_REVIEW, LITIGATION, LICENSE
+GEOPOLITICAL    CHINA_EXPOSURE, SANCTIONS, TARIFFS, CONFLICT_REGION,
+                SUPPLY_CHAIN
+POLITICAL       ELECTION, POLICY_CHANGE, GOV_SHUTDOWN, POLITICAL_TIES
+MACRO           RATES, INFLATION, RECESSION, MARKET_VOLATILITY, SECTOR_MOMENTUM
+SOCIAL          BRAND_SENTIMENT, RETAIL_HYPE, ESG_CONTROVERSY, LABOR
+
+Each topic has: name, description, which side it usually pushes demand
+(+/-/either), and keywords + LLM instructions used to classify it.
+
+
+--------------------------------------------------------------------------------
+5. DATABASE SCHEMA
+--------------------------------------------------------------------------------
+Rules:
+  • Every fact has: source (filing accession + section + quote),
+    known_at (when we learned it), entity_id, topic.
+  • Facts are never overwritten. A new amendment adds a new row with a
+    later known_at, and "current" means the latest version. This lets us
+    see exactly what was known at any past moment, which keeps the model
+    from training on information from the future.
+
+--- 5.1 ENTITIES (one registry for everything) ---------------------------
+
+entities
+  id PK, type ENUM(company, person, organization, product, country,
+                   index, sector),
+  name, cik NULL, ticker NULL, lei NULL, country NULL, created_at
+
+entity_aliases          -- what lets external text be matched
+  id PK, entity_id FK, alias, alias_type ENUM(legal_name, short_name,
+  ticker, former_name, nickname, social_handle, product_name),
+  source, confidence
+
+entity_relations        -- links between entities
+  id PK, from_entity FK, to_entity FK,
+  relation ENUM(officer_of, director_of, owns, subsidiary_of, competitor_of,
+                customer_of, supplier_of, underwriter_of, auditor_of,
+                operates_in, related_party_of),
+  attributes JSON, valid_from, valid_to, source_filing FK
+
+--- 5.2 FILINGS ------------------------------------------------------------
+
+deals
+  id PK, company_entity_id FK, status ENUM(draft, filed, range_set,
+  priced, trading, withdrawn, postponed), expected_ticker, exchange,
+  first_filed_at, priced_at, first_trade_at
+
+filings
+  accession_no PK, deal_id FK, cik, form_type, filed_at, url,
+  amends_accession NULL, parse_status, parser_version
+
+raw_documents
+  id PK, accession_no FK, filename, content_type, sha256, storage_path
+
+filing_sections
+  id PK, accession_no FK, section_key (from the §2 map), title,
+  start_offset, end_offset, text_hash
+
+--- 5.3 CATEGORY TABLES (every row: deal_id, accession_no, known_at,
+                         topic, source_quote) ----------------------------
+
+offering_terms        shares_offered_primary, shares_offered_secondary,
+                      overallotment_shares, price_low, price_high,
+                      final_price, gross_proceeds, exchange, ticker,
+                      dividend_policy, dilution_per_share,
+                      directed_share_program
+
+people                (entity of type person) full_name, age, bio_summary
+positions             person_entity FK, company_entity FK, title,
+                      role ENUM(ceo, cfo, coo, chair, director, founder,
+                      other_exec), is_founder, start_date, independent
+compensation          person_entity FK, year, salary, bonus, stock_awards,
+                      option_awards, total
+ownership             holder_entity FK (person OR org), share_class,
+                      shares_before, pct_before, shares_after, pct_after,
+                      voting_pct_after, shares_selling, holder_type
+                      ENUM(insider, vc, pe, strategic, other)
+share_classes         class_name, votes_per_share, convertible,
+                      shares_outstanding
+lockups               holder_group, days, early_release_conditions,
+                      expires_on (worked out from priced_at)
+underwriters          org_entity FK, role ENUM(lead_left, bookrunner,
+                      co_manager), shares_allocated, rank_score
+financial_facts       period_end, period_type ENUM(Q,FY,TTM), metric
+                      (XBRL concept or a standard name), value, unit
+kpis                  name (DAU, ARR, GMV, NRR...), period_end, value, unit
+segments              name, period_end, revenue, operating_income
+customer_concentration customer_entity FK NULL, pct_revenue, period
+geographic_exposure   country_entity FK, pct_revenue, has_operations,
+                      has_supply_chain
+products              product_entity FK, description, pct_revenue
+competitors           competitor_entity FK, named_in_section
+regulatory_exposure   regime (FDA, FTC, CFPB, crypto...), description,
+                      severity
+risk_factors          heading, body_hash, topic, severity_score (LLM 1-5),
+                      is_new_vs_prior_amendment
+use_of_proceeds       purpose, amount NULL, pct NULL
+related_party_txns    counterparty_entity FK, description, amount
+legal_proceedings     description, counterparty_entity FK, status,
+                      potential_amount
+capitalization        line_item, actual, as_adjusted
+
+--- 5.4 CHANGES BETWEEN AMENDMENTS ------------------------------------------
+
+filing_events            -- signals produced by comparing amendments
+  id PK, deal_id FK, accession_no FK, event_type (RANGE_SET,
+  RANGE_RAISED, RANGE_CUT, SIZE_UP, SIZE_DOWN, EXEC_ADDED, EXEC_REMOVED,
+  NEW_RISK_FACTOR, UNDERWRITER_ADDED, PRICED, WITHDRAWN...), topic,
+  entity_id NULL, before JSON, after JSON, occurred_at
+
+--- 5.5 EXTERNAL SIGNALS --------------------------------------------------
+
+watch_terms              -- built from entity_aliases + deals currently
+                            being tracked
+  id PK, term, entity_id FK, deal_id FK, topic_hint NULL, active
+
+external_signals
+  id PK, source ENUM(kalshi, polymarket, manifold, news, reddit,
+  stocktwits, hn, gtrends, gdelt), source_id, url, title, body,
+  author, published_at, fetched_at, raw JSON
+
+prediction_markets       -- one row per market
+  id PK (also an external_signals.id), venue, market_id, question,
+  resolution_rules, close_time, outcome_type ENUM(binary, scalar,
+  categorical)
+
+prediction_market_prices -- price history over time
+  market_id FK, ts, yes_price, volume, open_interest
+
+signal_links             -- the matching layer: links a signal to an
+                            entity and a topic
+  id PK, signal_id FK, entity_id FK, deal_id FK, topic,
+  stance ENUM(positive, negative, neutral, increases_prob, decreases_prob),
+  sentiment FLOAT, confidence FLOAT, method ENUM(alias, rule, llm, manual),
+  linked_at
+
+--- 5.6 MODEL ---------------------------------------------------------------
+
+feature_snapshots  deal_id, as_of, feature_name, value, topic, sources JSON
+predictions        deal_id, as_of, target, p10, p50, p90, model_version,
+                   shap JSON
+outcomes           deal_id, final_price, open_d1, close_d1..close_d5,
+                   volume_d1..d5
+
+
+--------------------------------------------------------------------------------
+6. MATCHING EXTERNAL DATA TO EDGAR (steps 9-11)
+--------------------------------------------------------------------------------
+Step A  FIND CANDIDATES — look for watch_terms in the title/body
+        (Aho-Corasick or a DB full-text index). This is fast and finds
+        most matches.
+Step B  RESOLVE AMBIGUITY — a name like "Jane Doe" or "Apex" can mean
+        several things. Accept the match only if the text also mentions
+        another entity linked in entity_relations (the company, ticker,
+        sector), or if an embedding comparison with the company profile
+        passes a threshold.
+Step C  CLASSIFY TOPIC — keyword rules first, then an LLM given the topic
+        list from §4, returning (topic, stance, sentiment, confidence).
+        One item can link to several (entity, topic) pairs.
+Step D  PREDICTION MARKETS get extra parsing: the question and resolution
+        rules are turned into a structured statement.
+          "Will Jane Doe be CEO of Apex on Dec 31 2027?"
+            → entity=Jane Doe, relation=officer_of Apex,
+              topic=LEADERSHIP.CEO_TENURE, direction: YES = she stays
+          "Will Apex IPO before July 1?"
+            → entity=Apex, topic=OFFERING.TIMING, YES = the deal happens
+          "Apex market cap at close of first trading day > $10B?"
+            → topic=OFFERING.VALUATION, scalar threshold. This is a
+              direct target signal and gets compared with our T3
+              prediction.
+Step E  Links with confidence below the threshold go to review_queue. Each
+        manual decision is saved and reused as an example for the
+        classifier.
+
+
+--------------------------------------------------------------------------------
+7. FEATURE BUILDER — EXPOSURE × SIGNAL
+--------------------------------------------------------------------------------
+For each deal, each topic, and each as_of time (using only data known by
+as_of):
+
+  exposure(topic)  = taken from EDGAR tables, scaled 0..1
+  signal(topic)    = combined from signal_links: market probabilities,
+                     news volume and sentiment, recent changes
+  impact(topic)    = exposure × signal × direction
+
+  Topic                        Exposure (EDGAR)                 Signal (external)
+  ---------------------------  -------------------------------  -------------------------------
+  LEADERSHIP.CEO_TENURE        CEO voting %, founder flag,       Kalshi P(leaves), news about
+                               "depend on key personnel" risk    departure, change in sentiment
+                               factor
+  GEOPOLITICAL.CHINA_EXPOSURE  % revenue/suppliers in China,     GDELT US-China tension,
+                               VIE structure                     tariff news, related markets
+  CUSTOMER.CONCENTRATION       top customer % of revenue         news about that customer (its
+                               (customer is itself an entity)    own entity → its own signals)
+  REGULATORY.ANTITRUST         regulatory_exposure severity      FTC/DOJ news, related markets
+  OWNERSHIP.VC_PE_EXIT         % of shares sold by VC/PE         social posts about "insiders
+                                                                 cashing out"
+  OFFERING.TIMING              current deal status               P(IPO by date) from markets
+  POLITICAL.GOV_SHUTDOWN       is the SEC still reviewing        P(shutdown) from markets
+                               (not yet EFFECT)
+
+Signals pass along links: news about a customer, supplier or competitor
+also affects the IPO company, scaled down by how strong the
+relationship is (customer_concentration.pct_revenue).
+Example: bad news about Apex's top customer (40% of revenue) has a large
+effect on Apex.
+
+The model receives one set of impact features per topic plus overall
+totals per category, so SHAP explanations can say things like
+"LEADERSHIP.CEO_TENURE pulled the forecast down 4%".
+
+
+--------------------------------------------------------------------------------
+8. CODE LAYOUT (adds to PLAN.txt §6)
+--------------------------------------------------------------------------------
+ipo_watch/
+  edgar/
+    client.py          rate-limited (≤10 req/s) client with User-Agent;
+                       RSS, submissions, archives
+    fetch.py           download → raw_documents (skips duplicates by hash)
+    sectionizer.py     find headings and the table of contents → sections
+    extractors/
+      base.py          interface: Extractor.run(section) → list[Fact]
+      offering.py  owners.py  mgmt.py  comp.py  uw.py  lockup.py
+      risks.py  business.py  financials.py  related.py  legal.py ...
+    schemas.py         Pydantic models = LLM output formats = table shapes
+    validate.py        §3 rules
+    diff.py            compare amendments → filing_events
+  entities/
+    registry.py        create, match, merge entities and aliases
+    resolver.py        candidate search + disambiguation (§6 A-B)
+  taxonomy/
+    topics.yaml        the §4 topic list (stored as data, not code)
+    classifier.py      keyword rules + LLM topic classification
+  signals/
+    kalshi.py polymarket.py manifold.py news.py reddit.py ...
+    market_parser.py   turns prediction market questions into
+                       structured statements (§6 D)
+    linker.py          external_signals → signal_links
+  features/
+    exposure.py  signal.py  builder.py   (§7, uses only data known by as_of)
+  db/
+    models.py          SQLAlchemy models for §5
+    migrations/        Alembic
+tests/
+  fixtures/            saved real S-1, S-1/A, 424B4 HTML files
+                       (5-10 IPOs)
+  test_sectionizer.py  test_extractors_*.py  test_validate.py
+  test_diff.py  test_resolver.py  test_market_parser.py
+
+
+--------------------------------------------------------------------------------
+9. BUILD ORDER
+--------------------------------------------------------------------------------
+1. DB models for entities, filings and the category tables + Alembic
+2. EDGAR client + fetch + save real S-1 examples as test fixtures
+3. Sectionizer (test against all fixtures until every section is found)
+4. Table extractors first (owners, mgmt, uw, offering, financials).
+   These are the most reliable.
+5. Validation + diff → filing_events
+6. LLM extractors (risks, business, lockups, related parties)
+7. Entity registry + watch_terms
+8. Kalshi/Polymarket collectors + market_parser + linker
+9. News/social collectors + topic classifier
+10. Feature builder (exposure × signal), then the model (PLAN.txt Phase 4)
+================================================================================
