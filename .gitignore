@@ -6,7 +6,11 @@ __pycache__/
 
 # Secrets / local config
 .env
-.claude/settings.local.json
+.claude/
+
+# Editors
+.vscode/
+.idea/
 
 # Data: downloaded filings and generated CSVs stay local
 data/cache/**
